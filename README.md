@@ -16,7 +16,7 @@
 | Python | 3.10+，自带 tkinter（官方安装包默认勾选） |
 | 可选 | [Pillow](https://pypi.org/project/Pillow/)——仅 `--download` 下载皮肤时用来切图集 |
 
-## 安装部署（3 步）
+## 安装部署（2 步 + 可选）
 
 ```bat
 git clone https://gitee.com/dontmove/zcode-pet.git
@@ -25,12 +25,21 @@ cd zcode-pet
 :: 1. 安装 zcode hooks（写入 ~/.zcode/cli/config.json，自动保留原有配置）
 python pet.py --install
 
-:: 2. 下载一只像素宠物形象（必选，皮肤全部来自 codex-pets.net）
-python pet.py --download non0
-
-:: 3. 启动桌宠
+:: 2. 启动桌宠（仓库已内置 3 只皮肤，开箱即用，默认 xm-cat 晓冒）
 start_pet.bat        :: 或: pythonw pet.py
+
+:: 可选：从 codex-pets.net 下载更多皮肤
+python pet.py --list
+python pet.py --download non0
 ```
+
+**内置皮肤**（`pets/` 随仓库分发，右键菜单随时切换）：
+
+| id | 名字 | 图集 | 张望 |
+|---|---|---|---|
+| xm-cat | 晓冒 | v1（57 帧） | 不支持（v1 无 look 行） |
+| clack-astra | Clack Astra | v2（74 帧） | ✓ |
+| kanroji-mitsuri | mitsuri | v2（74 帧） | ✓ |
 
 完成。**新开一个 zcode 会话**随便发句话试试：任务跑起来宠物开始巡逻，回复结束它跳起来撒花+响铃。
 

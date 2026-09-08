@@ -250,6 +250,18 @@ def current_pet() -> str | None:
     return pid if pid and (PETS_DIR / pid / "meta.json").exists() else None
 
 
+# 内置皮肤（随仓库分发，开箱即用）；DEFAULT_PET 为未选择时的默认形象
+DEFAULT_PET = "xm-cat"
+
+
+def bundled_default() -> str | None:
+    """未选择形象时的兜底：优先 DEFAULT_PET，否则第一只内置/已下载皮肤。"""
+    if (PETS_DIR / DEFAULT_PET / "meta.json").exists():
+        return DEFAULT_PET
+    metas = sorted(PETS_DIR.glob("*/meta.json"))
+    return metas[0].parent.name if metas else None
+
+
 # ---------- 桌宠 UI ----------
 
 import tkinter as tk  # noqa: E402
@@ -269,7 +281,7 @@ class Pet:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-        self.pid = pet_id or current_pet()
+        self.pid = pet_id or current_pet() or bundled_default()
         if not self.pid:
             raise SystemExit("没有可用的宠物形象，先: python pet.py --download non0")
         try:
@@ -661,12 +673,12 @@ def main():
         set_current_pet(pid)
         print(f"当前形象: {pid}")
     else:
-        if not current_pet():
+        if not (current_pet() or bundled_default()):
             r = tk.Tk()
             r.withdraw()
             tk.messagebox.showinfo(
                 "zcode-pet",
-                "还没有宠物形象。\n\n先下载一只（命令行运行）:\n\n"
+                "没有可用的宠物形象。\n\n先下载一只（命令行运行）:\n\n"
                 "python pet.py --list\npython pet.py --download non0")
             return
         Pet().run()

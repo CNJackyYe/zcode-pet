@@ -1,8 +1,10 @@
-# 本地运行状态与用户数据（皮肤可随时 --download 重新获取）
-pets/
+# 用户本地状态（选择/大小）；皮肤本体随仓库分发
+pets/current.txt
+pets/size.txt
 # Python
 __pycache__/
 *.pyc
 # 运行日志
 *.log
+# 会话目录
 .zcode/

@@ -283,6 +283,19 @@ def test_t001_runtime(tmp_pets_v1):
     print("ok T001 runtime: v1 禁张望 / done→review_wait 调度")
 
 
+def test_bundled_pets():
+    """内置皮肤开箱即用：默认形象存在且帧完整。"""
+    d = pet.bundled_default()
+    assert d, "仓库应至少内置一只皮肤"
+    meta = json.loads((pet.PETS_DIR / d / "meta.json").read_text(encoding="utf-8"))
+    fdir = pet.PETS_DIR / d / "frames"
+    for anim, (_, n) in meta["anims"].items():
+        for i in range(n):
+            assert (fdir / f"{anim}_{i}.png").exists(), f"缺帧 {d}/{anim}_{i}"
+    total = sum(v[1] for v in meta["anims"].values())
+    print(f"ok bundled: 默认形象 {d}（{total} 帧完整）")
+
+
 if __name__ == "__main__":
     import time
     with tempfile.TemporaryDirectory() as d:
@@ -293,6 +306,7 @@ if __name__ == "__main__":
         test_hook_subprocess(home)
         test_install_uninstall(home)
     test_codex_pet_support()
+    test_bundled_pets()
     test_interactions()
     test_scaling()
     test_patrol_step()
