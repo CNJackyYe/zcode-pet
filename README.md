@@ -1,6 +1,6 @@
 # zcode-pet 🐱
 
-**给你的 zcode 养一只桌面宠物。** 它趴在屏幕右下角（形象来自 [codex-pets.net](https://codex-pets.net) 社区像素宠物）：zcode 接到任务它就沿屏幕底部巡逻干活，任务完成跳起来撒花提醒，等你审阅时举牌呼叫，闲时好奇张望、打瞌睡——你可以撸它、拖它、换皮肤、调大小。
+**给你的 zcode 养一只桌面宠物。** 它趴在屏幕右下角（形象来自 [codex-pets.net](https://codex-pets.net) 社区像素宠物）：zcode 接到任务它就沿屏幕底部巡逻干活，任务完成跳起来提醒，等你审阅时举牌呼叫，闲时好奇张望、打瞌睡——你可以撸它、拖它、换皮肤、调大小。
 
 - **zcode 任务感知**：通过 zcode hooks 实时联动（多会话事件汇到一只宠物身上）
 - **11 种动画全用上**：idle / 巡逻(左右奔跑) / 挥手 / 跳跃 / 失败 / 等待 / 奔跑 / 审阅 / 左右张望
@@ -63,12 +63,12 @@ zcode 会话 ──hook事件──> pet_hook.py ──追加一行JSON──> ~
 |---|---|---|
 | SessionStart | 上线打招呼 | waving |
 | UserPromptSubmit | "🐾 巡逻中…"，沿屏幕底部来回走动 | running-right / running-left |
-| **Stop（任务完成）** | **跳跃+撒花+"✅ 任务完成！"+提示音** | jumping |
+| **Stop（任务完成）** | **跳跃+"✅ 任务完成！"+提示音** | jumping |
 | （完成后 30s 没动静） | "看看我的成果？" | review |
 | PermissionRequest | "📋 等你审阅"+提示音 | review |
 | PostToolUseFailure | "💢 有个工具出错了" | failed |
 | 空闲随机 | 好奇张望 2.5 秒（v2 皮肤） | look-right / look-left |
-| 空闲 5 分钟 | 睡觉飘 Z | waiting 慢放 |
+| 空闲 5 分钟 | 打瞌睡 | waiting 慢放 |
 | working 超 15 分钟无事件 | 视为中断回待机 | idle |
 
 其他细节：

@@ -313,13 +313,15 @@ def test_bundled_pets():
 
 def test_patrol_toggle():
     import pet as _pet
+    initial = _pet.load_patrol()          # 用户可能改过开关，测完恢复
+    (_pet.PETS_DIR / "patrol.txt").write_text("1", encoding="utf-8")
     try:
         p = _pet.Pet()
     except Exception as e:
         print(f"skip patrol toggle: {e}")
         return
     try:
-        assert p.patrol_on is True, "默认应开启巡逻"
+        assert p.patrol_on is True, "patrol.txt=1 时应开启巡逻"
         p.root.update()  # 让初始 geometry 落定，否则基准坐标是未生效的旧值
         p.muted = True
         p._set_patrol(False)
@@ -331,7 +333,7 @@ def test_patrol_toggle():
             p.tick(); p.root.update()
         assert p.root.winfo_x() == x0, "关闭巡逻后 working 状态不应移动窗口"
     finally:
-        p._set_patrol(True)
+        p._set_patrol(initial)
         p.root.destroy()
     print("ok patrol toggle: 默认开/持久化/关闭后原地不动")
 

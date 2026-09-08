@@ -560,7 +560,7 @@ class Pet:
         set_current_pet(self.pid)
 
     def draw_overlays(self):
-        """撒花/爱心/Zzz/气泡覆盖层。"""
+        """爱心/气泡覆盖层。"""
         cv, p, G = self.cv, self.phase, self.GROUND
         patted = self.pat_until > time.time()
 
@@ -568,22 +568,6 @@ class Pet:
             i = fn(*a, **kw)
             self._ids.append(i)
             return i
-
-        if self.state == "sleep":
-            for k in range(3):
-                t = (p * 0.08 + k * 0.33) % 1.0
-                zx, zy = 140 - k * 6 - t * 10, G - 70 - t * 26
-                fs = 11 + k * 4
-                add(cv.create_text, zx, zy, text="Z", font=("Segoe UI", fs, "bold"),
-                    fill="#9B8AFB")
-
-        if self.state == "done":
-            for k, wiggle in enumerate((0, 6, -5, 5, -6)):
-                t = (p * 0.2 + k * 0.2) % 1.0
-                hx = 45 + k * 25 + wiggle
-                hy = G - 95 - t * 45
-                add(cv.create_text, hx, hy, text=random.choice("✨🎉💛"),
-                    font=("Segoe UI Emoji", 10))
 
         if patted:
             t = 1 - (self.pat_until - time.time()) / 1.5
