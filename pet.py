@@ -1,8 +1,8 @@
 """zcode-pet: 零依赖桌面宠物（Windows / Python 标准库 tkinter）。
 
-一只趴在屏幕右下角的橘猫，通过轮询 ~/.zcode/pet/events.jsonl 感知 zcode：
-  收到任务 → 敲键盘状"工作中" / 任务完成 → 跳起来提醒 / 需要确认 → 摇铃提醒
-  / 工具出错 → 懵 / 久等无事 → 睡觉。
+一只趴在屏幕右下角的像素宠物（形象来自 codex-pets.net），通过轮询
+~/.zcode/pet/events.jsonl 感知 zcode：收到任务 → 巡逻干活 / 任务完成 →
+跳起来提醒 / 等你审阅 / 闲时张望、睡觉。
 
 用法:
   python pet.py --install     安装 zcode hooks（写入 ~/.zcode/cli/config.json）
@@ -10,13 +10,12 @@
   python pet.py --download <id|url> [--proxy http://host:port]
                                从 codex-pets.net 下载像素宠物并设为当前形象
   python pet.py --list [关键词] 浏览社区宠物
-  python pet.py --pet <id>    切换已下载的形象；--pet vector 切回内置橘猫
+  python pet.py --pet <id>    切换已下载的形象
   python pet.py               启动桌宠
 
-交互: 拖拽移动 / 单击撸猫 / 右键菜单(测试提醒·静音·换形象·大小·退出)
+交互: 拖拽移动 / 单击撸宠 / 右键菜单(测试提醒·静音·换形象·大小·退出)
 """
 import json
-import math
 import random
 import subprocess
 import sys
@@ -40,14 +39,29 @@ HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToo
 EVENT_MAP = {
     "SessionStart":       ("greet",     "我上线啦 👋"),
     "UserPromptSubmit":   ("working",   "收到任务，干活中…"),
-    "PermissionRequest":  ("attention", "⚠️ zcode 等你确认"),
+    "PermissionRequest":  ("attention", "📋 等你审阅"),
     "PostToolUseFailure": ("oops",      "💢 有个工具出错了"),
     "Stop":               ("done",      "✅ 任务完成！"),
 }
-TEMP_STATES = ("greet", "done", "attention", "oops")  # 几秒后自动回 idle
+TEMP_STATES = ("greet", "done", "attention", "oops", "review_wait", "glance")  # 几秒后自动回 idle
 TEMP_STATE_SECONDS = 6.0
+STATE_TTL = {"glance": 2.5}  # 张望只持续一小会儿
 WORKING_TIMEOUT = 15 * 60      # working 无事件 15 分钟视为中断
 IDLE_TO_SLEEP = 5 * 60         # idle 5 分钟入睡
+REVIEW_FOLLOWUP_DELAY = 30     # done 收尾后多少秒追加"看看成果"
+PATROL_SPEED = 60              # working 巡逻速度 px/s
+PATROL_SETTLE = 3.0            # 拖拽放下后定住几秒再继续巡逻
+
+
+def patrol_step(x: float, direction: int, speed: float, dt: float,
+                screen_w: int, win_w: int):
+    """working 巡逻：推进窗口 x 并在屏幕左右边缘折返。direction: +1 右 / -1 左。"""
+    x += direction * speed * dt
+    if x + win_w > screen_w:
+        x, direction = screen_w - win_w, -1
+    elif x < 0:
+        x, direction = 0, 1
+    return x, direction
 
 
 def read_new_events(path: Path, offset: int):
@@ -153,12 +167,14 @@ ANIMS_V2 = [("idle", 0, 7)] + ANIMS_V1[1:] + [("look-right-side", 9, 8), ("look-
 # zcode-pet 状态 -> (codex-pets 动画id, 播放速度倍率)
 STATE_ANIM = {
     "idle": ("idle", 1.0),
-    "working": ("running", 1.2),
+    "working": ("running", 1.2),        # 兜底；sprite 巡逻时按方向取 running-right/left
     "done": ("jumping", 1.5),
     "greet": ("waving", 1.0),
-    "attention": ("waving", 1.3),
+    "attention": ("review", 1.0),
     "oops": ("failed", 1.0),
     "sleep": ("waiting", 0.35),
+    "review_wait": ("review", 1.0),
+    "glance": ("idle", 1.0),            # 实际动画由 _glance_anim 覆盖（v2 look 行）
 }
 
 
@@ -238,18 +254,12 @@ def current_pet() -> str | None:
 
 import tkinter as tk  # noqa: E402
 import tkinter.font as tkfont  # noqa: E402
+import tkinter.messagebox  # noqa: E402,F401（无皮肤时引导弹窗用）
 
-W, H = 190, 205           # 画布：上方留给气泡，猫在底部
 TRANSPARENT = "#010203"  # Windows 透明色：此颜色像素完全穿透
-GROUND = H - 18
 
-# 橘猫配色
-C_BODY, C_LINE = "#FFD9A0", "#7A4E22"
-C_STRIPE, C_EAR = "#E8A25E", "#FFB3C1"
-C_BLUSH, C_EYE = "#FFB9C0", "#4A3220"
-
-PAT_WORDS = ["喵~", "嘿嘿", "摸摸头？", "加油鸭！", "喵呜♪"]
-WORKING_DOTS = ["🐾 工作中", "🐾 工作中·", "🐾 工作中··", "🐾 工作中···"]
+PAT_WORDS = ["嘿~", "嘿嘿", "摸摸头？", "加油鸭！", "♪"]
+WORKING_DOTS = ["🐾 巡逻中", "🐾 巡逻中·", "🐾 巡逻中··", "🐾 巡逻中···"]
 
 
 class Pet:
@@ -259,9 +269,9 @@ class Pet:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-        self.pid = pet_id or current_pet()  # None = 内置矢量橘猫
-        if self.pid == "vector":
-            self.pid = None
+        self.pid = pet_id or current_pet()
+        if not self.pid:
+            raise SystemExit("没有可用的宠物形象，先: python pet.py --download non0")
         try:
             s = float((PETS_DIR / "size.txt").read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
@@ -270,6 +280,7 @@ class Pet:
         self.frames = {}                # anim -> [PhotoImage]（懒加载）
         self.anim_pos = 0.0
         self._apply_dims()
+        self._refresh_skin_meta()
 
         self.root = tk.Tk()
         self.root.title("zcode-pet")
@@ -285,13 +296,17 @@ class Pet:
         self.cv.pack()
 
         self.state, self.muted = "idle", False
+        self.patrol_dir = random.choice((1, -1))
+        self.patrol_pause_until = 0.0
+        self.review_followup_at = 0.0
+        self.next_glance_at = time.time() + random.uniform(20, 60)
         try:
             # 启动只看新事件：从文件末尾开始，不重放历史（否则每次启动闪旧提醒）
             self.offset = EVENTS_FILE.stat().st_size
         except OSError:
             self.offset = 0
         self.last_event_ts, self.state_ts, self.phase = time.time(), time.time(), 0
-        self.bubble_until, self.pat_until, self.blink_at = 0, 0, time.time() + 2
+        self.bubble_until, self.pat_until = 0, 0
         self.bubble_text = None
         self._drag = None
         self._menu = None
@@ -312,6 +327,24 @@ class Pet:
         except Exception:
             pass
 
+    def _refresh_skin_meta(self):
+        """读取当前皮肤的动画清单（v1 缺 look 行 → 张望自动禁用）。"""
+        self._skin_anims = set()
+        self._glance_anim = None
+        if not self.pid:
+            return
+        try:
+            anims = json.loads((PETS_DIR / self.pid / "meta.json")
+                               .read_text(encoding="utf-8"))["anims"]
+            self._skin_anims = set(anims)
+        except (OSError, ValueError, KeyError):
+            pass
+
+    @property
+    def _look_anims(self):
+        return [a for a in ("look-right-side", "look-left-side")
+                if a in self._skin_anims]
+
     # ---- 事件与状态 ----
 
     def poll(self):
@@ -331,6 +364,7 @@ class Pet:
         state, text = EVENT_MAP[ev]
         now = time.time()
         self.state, self.last_event_ts, self.state_ts = state, now, now
+        self._glance_anim = None       # 新事件打断张望
         if text:
             self.say(text)
         if state == "done" and not self.muted:
@@ -358,38 +392,74 @@ class Pet:
         self.phase += 1
         self.state = next_state(self.state, self.last_event_ts, now)
 
-        if self.state in TEMP_STATES and now - self.state_ts > TEMP_STATE_SECONDS:
+        # 临时状态到期 → 回 idle（done 收尾时预约"看看成果"小剧场）
+        if self.state in TEMP_STATES and now - self.state_ts > STATE_TTL.get(self.state, TEMP_STATE_SECONDS):
+            if self.state == "done":
+                self.review_followup_at = now + REVIEW_FOLLOWUP_DELAY
+            if self.state == "glance":
+                self._glance_anim = None
             self.state, self.state_ts = "idle", now
+
+        # ponytail: 不做"用户无操作"检测（stdlib 无全局输入监听），固定 30s 延迟代替
+        if (self.state == "idle" and self.review_followup_at
+                and now >= self.review_followup_at):
+            self.review_followup_at = 0
+            self._enter_temp("review_wait", "看看我的成果？")
+
+        # v2 皮肤：idle 且安静时随机张望
+        if (self.state == "idle" and self._glance_anim is None
+                and not self.bubble_text and now >= self.next_glance_at
+                and self._look_anims):
+            self.next_glance_at = now + random.uniform(20, 60)
+            self._glance_anim = random.choice(self._look_anims)
+            self._enter_temp("glance")
+
         if self.state == "working":
             self.bubble_text = WORKING_DOTS[self.phase // 8 % 4]
             self.bubble_until = now + 2  # 常驻：working 状态期间每帧续期
         elif self.bubble_text and now > self.bubble_until:
             self.bubble_text = None
 
+        # working 巡逻：沿屏底走动，拖拽中/落定期暂停
+        if (self.state == "working" and not self._drag
+                and now > self.patrol_pause_until):
+            x, d = patrol_step(self.root.winfo_x(), self.patrol_dir, PATROL_SPEED,
+                               0.12, self.root.winfo_screenwidth(), self.W)
+            self.patrol_dir = d
+            self.root.geometry(f"+{int(x)}+{self.root.winfo_y()}")
+
         self.draw()
         self.root.after(120, self.tick)
+
+    def _enter_temp(self, state: str, text: str = None):
+        self.state, self.state_ts = state, time.time()
+        if text:
+            self.say(text)
 
     def draw(self):
         cv = self.cv
         for i in self._ids + self._bubble_ids:
             cv.delete(i)
         self._ids, self._bubble_ids, self._parts = [], [], {}
-        if self.pid:
-            self.draw_sprite()
-        else:
-            self.draw_vector()
+        self.draw_sprite()
         self.draw_overlays()
-        if not self.pid and self.scale != 1.0:
-            self.cv.scale("all", 0, 0, self.scale, self.scale)
         self.root.title(f"zcode-pet [{self.state}]")
 
     # ---- codex-pets sprite 渲染 ----
 
     def draw_sprite(self):
         anim, speed = STATE_ANIM.get(self.state, ("idle", 1.0))
+        if self.state == "glance" and self._glance_anim:
+            anim = self._glance_anim
+        elif self.state == "working":
+            side = "running-right" if self.patrol_dir > 0 else "running-left"
+            anim = side if side in self._skin_anims else anim
         if self.pat_until > time.time() and anim != "jumping":
             anim, speed = "jumping", 1.2
         imgs = self._anim_frames(anim)
+        if not imgs and anim != "idle":   # 皮肤缺该动画行时回退 idle
+            anim = "idle"
+            imgs = self._anim_frames(anim)
         if not imgs:
             return
         self.anim_pos = (self.anim_pos + speed) % len(imgs)
@@ -399,28 +469,23 @@ class Pet:
     def _anim_frames(self, anim: str) -> list:
         if anim in self.frames:
             return self.frames[anim]
-        meta = json.loads((PETS_DIR / self.pid / "meta.json").read_text(encoding="utf-8"))
-        _, n = meta["anims"][anim]
-        fdir = PETS_DIR / self.pid / "frames"
         try:
+            meta = json.loads((PETS_DIR / self.pid / "meta.json").read_text(encoding="utf-8"))
+            _, n = meta["anims"][anim]
+            fdir = PETS_DIR / self.pid / "frames"
             imgs = [tk.PhotoImage(file=str(fdir / f"{anim}_{i}.png")) for i in range(n)]
-        except tk.TclError:
+        except (OSError, ValueError, KeyError, tk.TclError):
             imgs = []
-        if self.scale != 1.0:
+        if imgs and self.scale != 1.0:
             zn, zd = zoom_factors(self.scale)
             imgs = [im.zoom(zn).subsample(zd) for im in imgs]
         self.frames[anim] = imgs
         return imgs
 
     def _apply_dims(self):
-        """真实窗口 = 基准 × 缩放。绘制空间：sprite=真实尺寸（图已缩放）；
-        矢量猫=基准坐标（画完统一用 canvas.scale 变换，字体单独放大）。"""
-        bw, bh = (200, 250) if self.pid else (W, H)
-        self.W, self.H = round(bw * self.scale), round(bh * self.scale)
-        if self.pid:
-            self.DW, self.GROUND = self.W, self.H - round(14 * self.scale)
-        else:
-            self.DW, self.GROUND = bw, bh - 14
+        """真实窗口 = 基准(200x250, 192x208 帧 + 头顶气泡) × 缩放。"""
+        self.W, self.H = round(200 * self.scale), round(250 * self.scale)
+        self.DW, self.GROUND = self.W, self.H - round(14 * self.scale)
 
     def _set_scale(self, s: float):
         old_w, old_h = self.W, self.H
@@ -434,112 +499,15 @@ class Pet:
         self.draw()
 
     def _switch_pet(self, pid: str):
-        self.pid = None if pid == "vector" else pid
+        self.pid = pid
         self.frames = {}
         self._apply_dims()
+        self._refresh_skin_meta()
         self.root.geometry(f"{self.W}x{self.H}")
-        if self.pid:
-            set_current_pet(self.pid)
-        else:
-            (PETS_DIR / "current.txt").unlink(missing_ok=True)
-
-    # ---- 内置矢量橘猫 ----
-
-    def draw_vector(self):
-        cv, p = self.cv, self.phase
-        G = self.GROUND
-
-        # 呼吸/跳跃位移
-        if self.state == "done":
-            dy = -int(20 * abs(math.sin(p * 0.35)))
-            bob = 0
-        elif self.state == "working":
-            dy, bob = 0, int(2.5 * math.sin(p * 0.5))
-        elif self.state == "sleep":
-            dy = bob = 0
-        else:
-            dy, bob = 0, int(1.5 * math.sin(p * 0.12))
-        base_y = dy + bob
-        sleeping = self.state == "sleep"
-        patted = self.pat_until > time.time()
-
-        def add(fn, *a, **kw):
-            i = fn(*a, **kw)
-            self._ids.append(i)
-            return i
-
-        o = dict(outline=C_LINE, width=2)
-
-        # 尾巴（摇动）
-        wag = math.sin(p * (0.4 if self.state == "working" else 0.15))
-        tx, ty = 148 + wag * 6, G - 22 + wag * -8
-        add(cv.create_line, 132, G - 14, tx, ty, smooth=True, width=7,
-            fill=C_BODY, capstyle="round")
-        add(cv.create_line, 132, G - 14, tx, ty, smooth=True, width=3,
-            fill=C_LINE, capstyle="round")
-
-        # 身体（趴猫椭圆）
-        add(cv.create_oval, 34, G - 62 + base_y, 142, G + base_y,
-            fill=C_BODY, **o)
-        # 耳朵
-        for sx in (0, 1):
-            ex = 55 if sx == 0 else 121
-            tipx = ex + (-8 if sx == 0 else 8)
-            add(cv.create_polygon, ex - 10, G - 52 + base_y, tipx,
-                G - 78 + base_y, ex + 10, G - 56 + base_y,
-                fill=C_BODY, **o)
-            add(cv.create_polygon, ex - 4, G - 55 + base_y, tipx,
-                G - 71 + base_y, ex + 4, G - 57 + base_y,
-                fill=C_EAR, outline="")
-        # 头顶条纹
-        for i, w in ((0, 10), (1, 14), (2, 10)):
-            cx = 68 + i * 16
-            add(cv.create_line, cx, G - 62 + base_y, cx + 2,
-                G - 50 + base_y, width=4, fill=C_STRIPE, capstyle="round")
-        # 前爪
-        for cx in (66, 96):
-            add(cv.create_oval, cx, G - 14 + base_y, cx + 24, G + base_y,
-                fill=C_BODY, **o)
-        # 眼睛
-        ey = G - 38 + base_y
-        if sleeping:
-            for ex in (66, 100):
-                add(cv.create_arc, ex, ey - 5, ex + 16, ey + 9, start=200,
-                    extent=140, style="arc", outline=C_EYE, width=2)
-        elif patted:
-            for ex in (66, 100):
-                add(cv.create_arc, ex, ey - 2, ex + 16, ey + 12, start=20,
-                    extent=140, style="arc", outline=C_EYE, width=2)
-        elif self._blink():
-            for ex in (66, 100):
-                add(cv.create_line, ex + 2, ey + 5, ex + 14, ey + 5,
-                    width=2, fill=C_EYE, capstyle="round")
-        else:
-            for ex in (66, 100):
-                add(cv.create_oval, ex, ey - 4, ex + 16, ey + 11,
-                    fill=C_EYE, outline="")
-        # 腮红
-        for bx in (48, 116):
-            add(cv.create_oval, bx, ey + 8, bx + 12, ey + 17, fill=C_BLUSH,
-                outline="")
-        # 嘴 ω（工作中/开心时张嘴）
-        my = ey + 14
-        if self.state in ("working", "done") or patted:
-            add(cv.create_oval, 80, my - 2, 98, my + 9, fill="#E8748A", outline="")
-        else:
-            add(cv.create_arc, 79, my - 6, 90, my + 6, start=210, extent=120,
-                style="arc", outline=C_EYE, width=2)
-            add(cv.create_arc, 89, my - 6, 100, my + 6, start=30, extent=120,
-                style="arc", outline=C_EYE, width=2)
-        # 胡须
-        for wx, dx in ((38, -14), (138, 14)):
-            add(cv.create_line, wx, G - 42 + base_y, wx + dx, G - 46 + base_y,
-                width=1, fill=C_LINE)
-            add(cv.create_line, wx, G - 36 + base_y, wx + dx, G - 34 + base_y,
-                width=1, fill=C_LINE)
+        set_current_pet(self.pid)
 
     def draw_overlays(self):
-        """撒花/爱心/Zzz/气泡——矢量猫与 sprite 模式共用。"""
+        """撒花/爱心/Zzz/气泡覆盖层。"""
         cv, p, G = self.cv, self.phase, self.GROUND
         patted = self.pat_until > time.time()
 
@@ -557,9 +525,9 @@ class Pet:
                     fill="#9B8AFB")
 
         if self.state == "done":
-            for k in range(5):
+            for k, wiggle in enumerate((0, 6, -5, 5, -6)):
                 t = (p * 0.2 + k * 0.2) % 1.0
-                hx = 45 + k * 25 + math.sin(k * 2.1) * 8
+                hx = 45 + k * 25 + wiggle
                 hy = G - 95 - t * 45
                 add(cv.create_text, hx, hy, text=random.choice("✨🎉💛"),
                     font=("Segoe UI Emoji", 10))
@@ -571,13 +539,6 @@ class Pet:
 
         if self.bubble_text:
             self._draw_bubble(self.bubble_text)
-
-    def _blink(self) -> bool:
-        now = time.time()
-        if now > self.blink_at:
-            self.blink_at = now + random.uniform(2.2, 4.5)
-            self.blink_off = now + 0.18
-        return getattr(self, "blink_off", 0) > now
 
     def _draw_bubble(self, text: str):
         cv = self.cv
@@ -592,7 +553,7 @@ class Pet:
             bx + tw - 8, by + th, bx + tw / 2 + 8, by + th,
             bx + tw / 2, by + th + 9, bx + tw / 2 - 8, by + th,  # 小尾巴
             bx + 8, by + th, bx, by + th / 2,
-            fill="#FFFFFF", outline=C_LINE, width=1.5, smooth=True)
+            fill="#FFFFFF", outline="#7A4E22", width=1.5, smooth=True)
         txt = cv.create_text(self.DW / 2, by + th / 2, text=text, font=font, fill="#333333")
         self._bubble_ids += [poly, txt]
 
@@ -629,6 +590,8 @@ class Pet:
                 self.state, self.state_ts = "idle", time.time()
             if random.random() < 0.6:
                 self.say(random.choice(PAT_WORDS), 2.0)
+        elif self._drag:  # 拖过：落定几秒再继续巡逻
+            self.patrol_pause_until = time.time() + PATROL_SETTLE
         self._drag = None
 
     def _popup(self, e):
@@ -639,10 +602,8 @@ class Pet:
         var = tk.BooleanVar(value=self.muted)
         m.add_checkbutton(label="静音", variable=var,
                           command=lambda: setattr(self, "muted", var.get()))
-        # 换形象：内置橘猫 + 已下载的 codex-pets
+        # 换形象：已下载的 codex-pets 皮肤
         pets_menu = tk.Menu(m, tearoff=0)
-        pets_menu.add_command(label="🐱 内置橘猫",
-                              command=lambda: self._switch_pet("vector"))
         for pdir in sorted(PETS_DIR.glob("*/meta.json")):
             try:
                 name = json.loads(pdir.read_text(encoding="utf-8")).get("name", pdir.parent.name)
@@ -675,7 +636,7 @@ def main():
     ap.add_argument("--uninstall", action="store_true", help="移除 zcode hooks")
     ap.add_argument("--download", metavar="ID|URL", help="从 codex-pets.net 下载像素宠物")
     ap.add_argument("--list", nargs="?", const="", metavar="关键词", help="浏览社区宠物")
-    ap.add_argument("--pet", metavar="ID|vector", help="切换当前形象")
+    ap.add_argument("--pet", metavar="ID", help="切换当前形象")
     ap.add_argument("--proxy", metavar="URL", help="HTTP 代理（默认读 HTTP(S)_PROXY 环境变量）")
     a = ap.parse_args()
 
@@ -695,15 +656,19 @@ def main():
             print(f"{p['id']:<16} {p['displayName']}  [{p.get('kind','')}] {', '.join(p.get('tags', [])[:4])}")
         print("下载: python pet.py --download <id>")
     elif a.pet:
-        if a.pet == "vector":
-            (PETS_DIR / "current.txt").unlink(missing_ok=True)
-            print("当前形象: 内置橘猫")
-        else:
-            pid = pet_id_from(a.pet)
-            assert (PETS_DIR / pid / "meta.json").exists(), f"未下载 {pid}，先 --download {pid}"
-            set_current_pet(pid)
-            print(f"当前形象: {pid}")
+        pid = pet_id_from(a.pet)
+        assert (PETS_DIR / pid / "meta.json").exists(), f"未下载 {pid}，先 --download {pid}"
+        set_current_pet(pid)
+        print(f"当前形象: {pid}")
     else:
+        if not current_pet():
+            r = tk.Tk()
+            r.withdraw()
+            tk.messagebox.showinfo(
+                "zcode-pet",
+                "还没有宠物形象。\n\n先下载一只（命令行运行）:\n\n"
+                "python pet.py --list\npython pet.py --download non0")
+            return
         Pet().run()
 
 

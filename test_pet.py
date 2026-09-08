@@ -237,6 +237,52 @@ def test_startup_no_replay(tmp_events):
     print("ok startup: 不重放历史事件")
 
 
+def test_patrol_step():
+    x, d = pet.patrol_step(100, 1, 60, 0.12, 1920, 200)
+    assert abs(x - 107.2) < 0.01 and d == 1, "应向右推进 speed*dt"
+    x, d = pet.patrol_step(1740, 1, 60, 0.12, 1920, 200)
+    assert x == 1720 and d == -1, "撞右边界应贴边并折返向左"
+    x, d = pet.patrol_step(3, -1, 60, 0.12, 1920, 200)
+    assert x == 0 and d == 1, "撞左边界应贴边并折返向右"
+    x, d = pet.patrol_step(500, -1, 60, 0, 1920, 200)
+    assert x == 500 and d == -1, "dt=0 不动"
+    print("ok patrol_step: 推进/右折返/左折返/静止")
+
+
+def test_t001_state_maps():
+    assert pet.STATE_ANIM["attention"] == ("review", 1.0), "权限确认应播 review"
+    assert "review_wait" in pet.STATE_ANIM and "glance" in pet.STATE_ANIM
+    assert pet.EVENT_MAP["PermissionRequest"][1] == "📋 等你审阅"
+    for st in pet.STATE_ANIM:
+        assert st in ("idle", "working", "done", "greet", "attention", "oops",
+                      "sleep", "review_wait", "glance"), st
+    print("ok T001 状态映射: attention=review / review_wait / glance")
+
+
+def test_t001_runtime(tmp_pets_v1):
+    """v1 皮肤无 look 行禁用张望；done 收尾 30s 后触发 review_wait。"""
+    import pet as _pet
+    saved = _pet.PETS_DIR
+    _pet.PETS_DIR = tmp_pets_v1
+    try:
+        p = _pet.Pet(pet_id="v1pet")            # 只在临时目录找皮肤
+        assert p._skin_anims == {"idle"} and p._look_anims == [], "v1 应无 look 动画"
+        p.muted = True
+        p.on_event("Stop")
+        assert p.state == "done"
+        # 熟化 done 到期 → 下一个 tick 应预约 followup 并回 idle
+        p.state_ts = time.time() - _pet.TEMP_STATE_SECONDS - 1
+        p.tick()
+        assert p.state == "idle" and p.review_followup_at > 0, "done 收尾应预约 review_wait"
+        p.review_followup_at = time.time() - 1   # 快进 30 秒
+        p.tick()
+        assert p.state == "review_wait" and p.bubble_text == "看看我的成果？"
+        p.root.destroy()
+    finally:
+        _pet.PETS_DIR = saved
+    print("ok T001 runtime: v1 禁张望 / done→review_wait 调度")
+
+
 if __name__ == "__main__":
     import time
     with tempfile.TemporaryDirectory() as d:
@@ -249,9 +295,17 @@ if __name__ == "__main__":
     test_codex_pet_support()
     test_interactions()
     test_scaling()
+    test_patrol_step()
+    test_t001_state_maps()
     with tempfile.TemporaryDirectory() as d:
         import pet as _pet
         evf = Path(d) / "events.jsonl"
         evf.write_text('{"event":"Stop","ts":1}\n{"event":"Stop","ts":2}\n', encoding="utf-8")
         test_startup_no_replay(evf)
+        v1dir = Path(d) / "pets"
+        (v1dir / "v1pet").mkdir(parents=True)
+        (v1dir / "v1pet" / "meta.json").write_text(
+            json.dumps({"id": "v1pet", "version": 1, "anims": {"idle": [0, 1]}}),
+            encoding="utf-8")
+        test_t001_runtime(v1dir)
     print("ALL TESTS PASSED")
