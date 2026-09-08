@@ -261,6 +261,14 @@ def set_current_pet(pid: str) -> None:
 SIZES = [0.5, 0.75, 1.0, 1.5, 2.0]
 
 
+def load_patrol() -> bool:
+    """巡逻开关（pets/patrol.txt），默认开。"""
+    try:
+        return (PETS_DIR / "patrol.txt").read_text(encoding="utf-8").strip() != "0"
+    except OSError:
+        return True
+
+
 def zoom_factors(s: float):
     """缩放比例 -> (num, den)，PhotoImage.zoom(num).subsample(den) 即最近邻缩放。"""
     f = Fraction(s).limit_denominator(4)
@@ -333,6 +341,7 @@ class Pet:
         self.cv.pack()
 
         self.state, self.muted = "idle", False
+        self.patrol_on = load_patrol()
         self.patrol_dir = random.choice((1, -1))
         self.patrol_pause_until = 0.0
         self.review_followup_at = 0.0
@@ -457,8 +466,8 @@ class Pet:
         elif self.bubble_text and now > self.bubble_until:
             self.bubble_text = None
 
-        # working 巡逻：沿屏底走动，拖拽中/落定期暂停；在宠物所在显示器内折返
-        if (self.state == "working" and not self._drag
+        # working 巡逻（可用菜单开关）：沿屏底走动，拖拽中/落定期暂停；在所在显示器内折返
+        if (self.patrol_on and self.state == "working" and not self._drag
                 and now > self.patrol_pause_until):
             wx, wy = self.root.winfo_x(), self.root.winfo_y()
             lo, hi = monitor_span(wx + self.W // 2, wy + self.H // 2)
@@ -490,9 +499,9 @@ class Pet:
         anim, speed = STATE_ANIM.get(self.state, ("idle", 1.0))
         if self.state == "glance" and self._glance_anim:
             anim = self._glance_anim
-        elif self.state == "working":
+        elif self.state == "working" and self.patrol_on:
             side = "running-right" if self.patrol_dir > 0 else "running-left"
-            anim = side if side in self._skin_anims else anim
+            anim = side if side in self._skin_anims else anim  # 关巡逻则原地 running
         if self.pat_until > time.time() and anim != "jumping":
             anim, speed = "jumping", 1.2
         imgs = self._anim_frames(anim)
@@ -536,6 +545,11 @@ class Pet:
         # 右下角锚定，缩放时宠物不会往下钻出屏幕
         self.root.geometry(f"{self.W}x{self.H}+{x + old_w - self.W}+{y + old_h - self.H}")
         self.draw()
+
+    def _set_patrol(self, on: bool):
+        self.patrol_on = on
+        PETS_DIR.mkdir(exist_ok=True)
+        (PETS_DIR / "patrol.txt").write_text("1" if on else "0", encoding="utf-8")
 
     def _switch_pet(self, pid: str):
         self.pid = pid
@@ -641,6 +655,9 @@ class Pet:
         var = tk.BooleanVar(value=self.muted)
         m.add_checkbutton(label="静音", variable=var,
                           command=lambda: setattr(self, "muted", var.get()))
+        pv = tk.BooleanVar(value=self.patrol_on)
+        m.add_checkbutton(label="巡逻", variable=pv,
+                          command=lambda: self._set_patrol(pv.get()))
         # 换形象：已下载的 codex-pets 皮肤
         pets_menu = tk.Menu(m, tearoff=0)
         for pdir in sorted(PETS_DIR.glob("*/meta.json")):

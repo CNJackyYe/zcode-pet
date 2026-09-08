@@ -1,6 +1,7 @@
-# 用户本地状态（选择/大小）；皮肤本体随仓库分发
+# 用户本地状态（选择/大小/巡逻开关）；皮肤本体随仓库分发
 pets/current.txt
 pets/size.txt
+pets/patrol.txt
 # Python
 __pycache__/
 *.pyc

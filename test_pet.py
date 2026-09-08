@@ -311,6 +311,31 @@ def test_bundled_pets():
     print(f"ok bundled: 默认形象 {d}（{total} 帧完整）")
 
 
+def test_patrol_toggle():
+    import pet as _pet
+    try:
+        p = _pet.Pet()
+    except Exception as e:
+        print(f"skip patrol toggle: {e}")
+        return
+    try:
+        assert p.patrol_on is True, "默认应开启巡逻"
+        p.root.update()  # 让初始 geometry 落定，否则基准坐标是未生效的旧值
+        p.muted = True
+        p._set_patrol(False)
+        assert (_pet.PETS_DIR / "patrol.txt").read_text(encoding="utf-8") == "0"
+        assert _pet.load_patrol() is False
+        p.on_event("UserPromptSubmit")
+        x0 = p.root.winfo_x()
+        for _ in range(10):
+            p.tick(); p.root.update()
+        assert p.root.winfo_x() == x0, "关闭巡逻后 working 状态不应移动窗口"
+    finally:
+        p._set_patrol(True)
+        p.root.destroy()
+    print("ok patrol toggle: 默认开/持久化/关闭后原地不动")
+
+
 if __name__ == "__main__":
     import time
     with tempfile.TemporaryDirectory() as d:
@@ -326,6 +351,7 @@ if __name__ == "__main__":
     test_scaling()
     test_patrol_step()
     test_monitor_span()
+    test_patrol_toggle()
     test_t001_state_maps()
     with tempfile.TemporaryDirectory() as d:
         import pet as _pet
