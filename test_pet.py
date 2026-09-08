@@ -201,7 +201,7 @@ def test_scaling():
         assert _pet.zoom_factors(1.5) == (3, 2)
         assert _pet.zoom_factors(2.0) == (2, 1)
 
-        # 先归一到 100%，与持久化的 size.txt 解耦（用户可能正用其它档位）
+        # 先归一到 100%，与持久化设置解耦（用户可能正用其它档位）
         p._set_scale(1.0)
         p.root.update()
         base_w, base_h = p.W, p.H
@@ -209,7 +209,7 @@ def test_scaling():
         p.root.update()
         assert p.W == round(base_w * 1.5) and p.H == round(base_h * 1.5)
         assert p.root.winfo_width() == p.W, "窗口应随缩放变大"
-        assert float((_pet.PETS_DIR / "size.txt").read_text(encoding="utf-8")) == 1.5
+        assert _pet.load_settings()["scale"] == 1.5
         if p.pid:  # sprite 模式：帧图真实放大到 192*1.5
             imgs = p._anim_frames("idle")
             assert imgs and imgs[0].width() == 288, imgs[0].width() if imgs else None
@@ -313,20 +313,19 @@ def test_bundled_pets():
 
 def test_patrol_toggle():
     import pet as _pet
-    initial = _pet.load_patrol()          # 用户可能改过开关，测完恢复
-    (_pet.PETS_DIR / "patrol.txt").write_text("1", encoding="utf-8")
+    initial = _pet.load_settings()["patrol"]   # 用户可能改过开关，测完恢复
+    _pet.save_settings(patrol=True)
     try:
         p = _pet.Pet()
     except Exception as e:
         print(f"skip patrol toggle: {e}")
         return
     try:
-        assert p.patrol_on is True, "patrol.txt=1 时应开启巡逻"
+        assert p.patrol_on is True, "设置 patrol=True 时应开启巡逻"
         p.root.update()  # 让初始 geometry 落定，否则基准坐标是未生效的旧值
         p.muted = True
         p._set_patrol(False)
-        assert (_pet.PETS_DIR / "patrol.txt").read_text(encoding="utf-8") == "0"
-        assert _pet.load_patrol() is False
+        assert _pet.load_settings()["patrol"] is False
         p.on_event("UserPromptSubmit")
         p.tick()
         assert p.bubble_text.startswith("🐾 工作中"), f"关巡逻应显示工作中: {p.bubble_text}"
@@ -340,7 +339,45 @@ def test_patrol_toggle():
     finally:
         p._set_patrol(initial)
         p.root.destroy()
-    print("ok patrol toggle: 默认开/持久化/关闭后原地不动")
+    print("ok patrol toggle: 开关持久化/关闭后原地不动/气泡文案跟随开关")
+
+
+def test_settings_persistence():
+    """设置统一持久化：往返读写 / 位置恢复 / 越界位置回默认。"""
+    import pet as _pet
+    f = _pet.PETS_DIR / "settings.json"
+    bak = f.read_bytes() if f.exists() else None
+    try:
+        # 往返
+        _pet.save_settings(scale=1.5, patrol=False, muted=True, x=100, y=100)
+        s = _pet.load_settings()
+        assert s["scale"] == 1.5 and s["patrol"] is False and s["muted"] is True
+
+        # 位置恢复：退出位置 +300+300，下次启动直接落座
+        p = _pet.Pet()
+        p.root.update()
+        p.root.geometry("+300+300")
+        p.root.update()
+        p._save()
+        p.root.destroy()
+        p2 = _pet.Pet()
+        p2.root.update()
+        assert (p2.root.winfo_x(), p2.root.winfo_y()) == (300, 300), "应恢复上次退出位置"
+
+        # 越界位置（换显示器后）→ 回默认右下角
+        _pet.save_settings(x=99999, y=99999)
+        p2.root.destroy()
+        p3 = _pet.Pet()
+        p3.root.update()
+        assert p3.root.winfo_x() == p3.root.winfo_screenwidth() - p3.W - 40, "越界应回默认位置"
+        p3.root.destroy()
+    finally:
+        f.parent.mkdir(exist_ok=True)
+        if bak is None:
+            f.unlink(missing_ok=True)
+        else:
+            f.write_bytes(bak)
+    print("ok settings: 往返/位置恢复/越界回默认")
 
 
 if __name__ == "__main__":
@@ -359,6 +396,7 @@ if __name__ == "__main__":
     test_patrol_step()
     test_monitor_span()
     test_patrol_toggle()
+    test_settings_persistence()
     test_t001_state_maps()
     with tempfile.TemporaryDirectory() as d:
         import pet as _pet

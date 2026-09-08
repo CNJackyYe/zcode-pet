@@ -260,13 +260,38 @@ def set_current_pet(pid: str) -> None:
 # 大小档位；tk 的 zoom/subsample 只有整数倍，用分数组合出任意档
 SIZES = [0.5, 0.75, 1.0, 1.5, 2.0]
 
+SETTINGS_FILE = PETS_DIR / "settings.json"
+DEFAULT_SETTINGS = {"scale": 1.0, "patrol": True, "muted": False, "x": None, "y": None}
 
-def load_patrol() -> bool:
-    """巡逻开关（pets/patrol.txt），默认开。"""
+
+def load_settings() -> dict:
     try:
-        return (PETS_DIR / "patrol.txt").read_text(encoding="utf-8").strip() != "0"
-    except OSError:
-        return True
+        d = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        d = {}
+    if not d:  # 旧版散文件一次性迁移（size.txt / patrol.txt）
+        try:
+            d["scale"] = float((PETS_DIR / "size.txt").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pass
+        try:
+            d["patrol"] = (PETS_DIR / "patrol.txt").read_text(encoding="utf-8").strip() != "0"
+        except OSError:
+            pass
+    out = dict(DEFAULT_SETTINGS)
+    out.update({k: d[k] for k in DEFAULT_SETTINGS if k in d})
+    if out["scale"] not in SIZES:
+        out["scale"] = 1.0
+    out["patrol"], out["muted"] = bool(out["patrol"]), bool(out["muted"])
+    return out
+
+
+def save_settings(**kw) -> dict:
+    s = load_settings()
+    s.update(kw)
+    SETTINGS_FILE.parent.mkdir(exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+    return s
 
 
 def zoom_factors(s: float):
@@ -320,11 +345,8 @@ class Pet:
         self.pid = pet_id or current_pet() or bundled_default()
         if not self.pid:
             raise SystemExit("没有可用的宠物形象，先: python pet.py --download non0")
-        try:
-            s = float((PETS_DIR / "size.txt").read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            s = 1.0
-        self.scale = s if s in SIZES else 1.0
+        self.settings = load_settings()
+        self.scale = self.settings["scale"]
         self.frames = {}                # anim -> [PhotoImage]（懒加载）
         self.anim_pos = 0.0
         self._apply_dims()
@@ -337,15 +359,24 @@ class Pet:
         self.root.attributes("-transparentcolor", TRANSPARENT)  # 透明穿透
         self.root.config(bg=TRANSPARENT)
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{self.W}x{self.H}+{sw - self.W - 40}+{sh - self.H - 60}")
+        # 恢复上次位置：须落在某块显示器内（防分辨率/布局变更后跑到屏外）
+        px, py = self.settings["x"], self.settings["y"]
+        ok = px is not None
+        if ok:
+            lo, hi = monitor_span(px + self.W // 2, py)
+            ok = lo <= px + self.W // 2 < hi and -200 <= py <= sh
+        self.root.geometry(f"{self.W}x{self.H}+{px if ok else sw - self.W - 40}"
+                           f"+{py if ok else sh - self.H - 60}")
 
         self.cv = tk.Canvas(self.root, width=self.W, height=self.H, bg=TRANSPARENT,
                             highlightthickness=0, bd=0)
         self.cv.pack()
 
-        self.state, self.muted = "idle", False
-        self.patrol_on = load_patrol()
+        self.state = "idle"
+        self.muted = self.settings["muted"]
+        self.patrol_on = self.settings["patrol"]
         self.patrol_dir = random.choice((1, -1))
+        self._polls = 0
         self.patrol_pause_until = 0.0
         self.review_followup_at = 0.0
         self.next_glance_at = time.time() + random.uniform(20, 60)
@@ -396,7 +427,14 @@ class Pet:
 
     # ---- 事件与状态 ----
 
+    def _save(self):
+        """落盘当前设置（含窗口位置）。"""
+        save_settings(x=self.root.winfo_x(), y=self.root.winfo_y())
+
     def poll(self):
+        self._polls += 1
+        if self._polls % 20 == 0:  # 每 10s 兜底存一次位置，防进程被杀丢失
+            self._save()
         # ponytail: 事件文件只增不删，>1MB 时清空轮转（事件是易失的）
         try:
             if EVENTS_FILE.stat().st_size > 1_000_000:
@@ -541,7 +579,7 @@ class Pet:
     def _set_scale(self, s: float):
         old_w, old_h = self.W, self.H
         self.scale = s
-        (PETS_DIR / "size.txt").write_text(str(s), encoding="utf-8")
+        save_settings(scale=s)
         self.frames = {}                # 缓存的帧是按旧缩放生成的
         self._apply_dims()
         x, y = self.root.winfo_x(), self.root.winfo_y()
@@ -551,8 +589,11 @@ class Pet:
 
     def _set_patrol(self, on: bool):
         self.patrol_on = on
-        PETS_DIR.mkdir(exist_ok=True)
-        (PETS_DIR / "patrol.txt").write_text("1" if on else "0", encoding="utf-8")
+        save_settings(patrol=on)
+
+    def _set_muted(self, on: bool):
+        self.muted = on
+        save_settings(muted=on)
 
     def _switch_pet(self, pid: str):
         self.pid = pid
@@ -630,8 +671,9 @@ class Pet:
                 self.state, self.state_ts = "idle", time.time()
             if random.random() < 0.6:
                 self.say(random.choice(PAT_WORDS), 2.0)
-        elif self._drag:  # 拖过：落定几秒再继续巡逻
+        elif self._drag:  # 拖过：落定几秒再继续巡逻，并记住新位置
             self.patrol_pause_until = time.time() + PATROL_SETTLE
+            self._save()
         self._drag = None
 
     def _popup(self, e):
@@ -641,7 +683,7 @@ class Pet:
         m.add_separator()
         var = tk.BooleanVar(value=self.muted)
         m.add_checkbutton(label="静音", variable=var,
-                          command=lambda: setattr(self, "muted", var.get()))
+                          command=lambda: self._set_muted(var.get()))
         pv = tk.BooleanVar(value=self.patrol_on)
         m.add_checkbutton(label="巡逻", variable=pv,
                           command=lambda: self._set_patrol(pv.get()))
