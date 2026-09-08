@@ -1,0 +1,52 @@
+{
+ "id": "snoopy",
+ "name": "Snoopy",
+ "kind": "animal",
+ "version": 2,
+ "anims": {
+  "idle": [
+   0,
+   7
+  ],
+  "running-right": [
+   1,
+   8
+  ],
+  "running-left": [
+   2,
+   8
+  ],
+  "waving": [
+   3,
+   4
+  ],
+  "jumping": [
+   4,
+   5
+  ],
+  "failed": [
+   5,
+   8
+  ],
+  "waiting": [
+   6,
+   6
+  ],
+  "running": [
+   7,
+   6
+  ],
+  "review": [
+   8,
+   6
+  ],
+  "look-right-side": [
+   9,
+   8
+  ],
+  "look-left-side": [
+   10,
+   8
+  ]
+ }
+}

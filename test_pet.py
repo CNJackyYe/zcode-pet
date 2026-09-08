@@ -380,6 +380,40 @@ def test_settings_persistence():
     print("ok settings: 往返/位置恢复/越界回默认")
 
 
+def test_remove_pet():
+    """删除皮肤：目录移除；删当前形象自动切默认；删到最后一只清空选择。"""
+    import pet as _pet
+    saved = _pet.PETS_DIR
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        for pid in ("aaa", "bbb"):
+            pdir = root / pid
+            (pdir / "frames").mkdir(parents=True)
+            (pdir / "meta.json").write_text(
+                json.dumps({"id": pid, "version": 1, "anims": {"idle": [0, 1]}}),
+                encoding="utf-8")
+        _pet.PETS_DIR = root
+        try:
+            _pet.set_current_pet("aaa")
+            _pet.remove_pet("bbb")                       # 删非当前
+            assert not (root / "bbb").exists() and _pet.current_pet() == "aaa"
+            _pet.remove_pet("aaa")                       # 删当前 → 无默认可切
+            assert not (root / "aaa").exists() and _pet.current_pet() is None
+            # 再放两只：删当前应切到剩下那只
+            for pid in ("ccc", "ddd"):
+                pdir = root / pid
+                (pdir / "frames").mkdir(parents=True)
+                (pdir / "meta.json").write_text(
+                    json.dumps({"id": pid, "version": 1, "anims": {"idle": [0, 1]}}),
+                    encoding="utf-8")
+            _pet.set_current_pet("ccc")
+            _pet.remove_pet("ccc")
+            assert _pet.current_pet() == "ddd", "删当前形象应切到剩下的"
+        finally:
+            _pet.PETS_DIR = saved
+    print("ok remove_pet: 删非当前/删到空/删当前切默认")
+
+
 if __name__ == "__main__":
     import time
     with tempfile.TemporaryDirectory() as d:
@@ -397,6 +431,7 @@ if __name__ == "__main__":
     test_monitor_span()
     test_patrol_toggle()
     test_settings_persistence()
+    test_remove_pet()
     test_t001_state_maps()
     with tempfile.TemporaryDirectory() as d:
         import pet as _pet

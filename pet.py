@@ -203,6 +203,19 @@ STATE_ANIM = {
 }
 
 
+def remove_pet(pid: str) -> None:
+    """删除皮肤目录；若删的是当前形象，自动切到默认形象（没有则清空选择）。"""
+    import shutil
+    was_current = current_pet() == pid  # 必须在删除前判断：删后 meta 不存在，current_pet() 会读成 None
+    shutil.rmtree(PETS_DIR / pid, ignore_errors=True)
+    if was_current:
+        nxt = bundled_default()
+        if nxt:
+            set_current_pet(nxt)
+        else:
+            (PETS_DIR / "current.txt").unlink(missing_ok=True)
+
+
 def pet_id_from(text: str) -> str:
     """接受纯 id 或分享页 URL（https://codex-pets.net/#/pets/non0）。"""
     if "/" not in text:
@@ -587,6 +600,19 @@ class Pet:
         self.root.geometry(f"{self.W}x{self.H}+{x + old_w - self.W}+{y + old_h - self.H}")
         self.draw()
 
+    def _delete_pet(self, pid: str):
+        if not tk.messagebox.askokcancel("zcode-pet", f"删除形象 {pid}？\n（不可恢复，可重新 --download 下载）"):
+            return
+        remove_pet(pid)
+        if pid == self.pid:
+            nxt = bundled_default()
+            if nxt:
+                self._switch_pet(nxt)
+            else:  # 最后一只也删了：没有形象可显示，退出
+                self.root.destroy()
+                return
+        self.draw()
+
     def _set_patrol(self, on: bool):
         self.patrol_on = on
         save_settings(patrol=on)
@@ -699,6 +725,13 @@ class Pet:
             pets_menu.add_command(label=f"{name} ({pid}){mark}",
                                   command=lambda pid=pid: self._switch_pet(pid))
         m.add_cascade(label="换形象", menu=pets_menu)
+        # 删除形象（确认后删除，当前形象被删则切默认）
+        del_menu = tk.Menu(m, tearoff=0)
+        for pdir in sorted(PETS_DIR.glob("*/meta.json")):
+            pid = pdir.parent.name
+            del_menu.add_command(label=f"🗑 {pid}",
+                                 command=lambda pid=pid: self._delete_pet(pid))
+        m.add_cascade(label="删除形象", menu=del_menu)
         # 大小：50%~200%，最近邻缩放（像素画不糊），选择持久化
         size_menu = tk.Menu(m, tearoff=0)
         sv = tk.DoubleVar(value=self.scale)
@@ -722,6 +755,7 @@ def main():
     ap.add_argument("--download", metavar="ID|URL", help="从 codex-pets.net 下载像素宠物")
     ap.add_argument("--list", nargs="?", const="", metavar="关键词", help="浏览社区宠物")
     ap.add_argument("--pet", metavar="ID", help="切换当前形象")
+    ap.add_argument("--remove", metavar="ID", help="删除已下载的形象（删当前形象则切默认）")
     ap.add_argument("--proxy", metavar="URL", help="HTTP 代理（默认读 HTTP(S)_PROXY 环境变量）")
     a = ap.parse_args()
 
@@ -740,6 +774,12 @@ def main():
         for p in list_pets(a.list, a.proxy):
             print(f"{p['id']:<16} {p['displayName']}  [{p.get('kind','')}] {', '.join(p.get('tags', [])[:4])}")
         print("下载: python pet.py --download <id>")
+    elif a.remove:
+        pid = pet_id_from(a.remove)
+        assert (PETS_DIR / pid / "meta.json").exists(), f"不存在 {pid}"
+        remove_pet(pid)
+        cur = current_pet() or bundled_default()
+        print(f"已删除 {pid}，当前形象: {cur or '无'}")
     elif a.pet:
         pid = pet_id_from(a.pet)
         assert (PETS_DIR / pid / "meta.json").exists(), f"未下载 {pid}，先 --download {pid}"

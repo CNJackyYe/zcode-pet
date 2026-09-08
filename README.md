@@ -86,6 +86,7 @@ python pet.py --install            :: 安装 hooks
 python pet.py --uninstall          :: 移除 hooks（自动保留其它配置）
 python pet.py --list [关键词]       :: 浏览 codex-pets 社区宠物
 python pet.py --download <id|URL>  :: 下载皮肤并设为当前形象
+python pet.py --remove <id>           :: 删除形象（删当前形象则切默认）
 python pet.py --pet <id>           :: 切换已下载形象
 python pet.py                      :: 启动桌宠
 python test_pet.py                 :: 自检（15 组断言）
