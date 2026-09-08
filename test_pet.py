@@ -238,15 +238,30 @@ def test_startup_no_replay(tmp_events):
 
 
 def test_patrol_step():
-    x, d = pet.patrol_step(100, 1, 60, 0.12, 1920, 200)
+    x, d = pet.patrol_step(100, 1, 60, 0.12, 0, 1720)
     assert abs(x - 107.2) < 0.01 and d == 1, "应向右推进 speed*dt"
-    x, d = pet.patrol_step(1740, 1, 60, 0.12, 1920, 200)
-    assert x == 1720 and d == -1, "撞右边界应贴边并折返向左"
-    x, d = pet.patrol_step(3, -1, 60, 0.12, 1920, 200)
-    assert x == 0 and d == 1, "撞左边界应贴边并折返向右"
-    x, d = pet.patrol_step(500, -1, 60, 0, 1920, 200)
+    x, d = pet.patrol_step(1721, 1, 60, 0.12, 0, 1720)
+    assert x == 1720 and d == -1, "超出右界应贴界并折返向左"
+    x, d = pet.patrol_step(3, -1, 60, 0.12, 0, 1720)
+    assert x == 0 and d == 1, "超出左界应贴界并折返向右"
+    # 副屏在主屏左侧（x 为负）：负坐标边界同样成立
+    x, d = pet.patrol_step(-1079, -1, 60, 0.12, -1080, -200)
+    assert x == -1080 and d == 1, "负坐标副屏左界折返"
+    x, d = pet.patrol_step(-201, 1, 60, 0.12, -1080, -200)
+    assert x == -200 and d == -1, "负坐标副屏右界折返"
+    x, d = pet.patrol_step(500, -1, 60, 0, 0, 1720)
     assert x == 500 and d == -1, "dt=0 不动"
-    print("ok patrol_step: 推进/右折返/左折返/静止")
+    print("ok patrol_step: 推进/折返/负坐标副屏/静止")
+
+
+def test_monitor_span():
+    # 主屏内取主屏，副屏内取副屏（此机副屏 [-1080,0)）
+    lo, hi = pet.monitor_span(960, 500)
+    assert lo <= 960 < hi and hi - lo > 0, (lo, hi)
+    lo2, hi2 = pet.monitor_span(-500, 500)
+    if lo2 != 0 or hi2 != 1920:  # 单屏机器回退主屏，双屏机器应是副屏
+        assert lo2 <= -500 < hi2, (lo2, hi2)
+    print(f"ok monitor_span: 主屏({lo},{hi}) 副屏查询({lo2},{hi2})")
 
 
 def test_t001_state_maps():
@@ -310,6 +325,7 @@ if __name__ == "__main__":
     test_interactions()
     test_scaling()
     test_patrol_step()
+    test_monitor_span()
     test_t001_state_maps()
     with tempfile.TemporaryDirectory() as d:
         import pet as _pet

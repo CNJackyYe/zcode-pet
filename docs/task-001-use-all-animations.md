@@ -14,7 +14,9 @@ codex-pets 皮肤自带 11 种动画（v1 前 9 行 + v2 新增 2 行 look），
 
 - `working` 状态以 60px/s 沿屏幕底部来回走动（`patrol_step` 纯函数：推进+边缘折返）
 - 动画按移动方向取 running-right / running-left（皮肤缺行回退 running）
-- 拖拽暂停、放下后定 3 秒（`PATROL_SETTLE`）再继续；仅主显示器
+- 拖拽暂停、放下后定 3 秒（`PATROL_SETTLE`）再继续
+- 多显示器：`monitor_span`（Win32 EnumDisplayMonitors）识别宠物所在屏，
+  在该屏边界内折返（含副屏负坐标；后续修复，2026-09-08）
 
 ### 2. 等待审阅（review）✅
 

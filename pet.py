@@ -54,14 +54,39 @@ PATROL_SETTLE = 3.0            # 拖拽放下后定住几秒再继续巡逻
 
 
 def patrol_step(x: float, direction: int, speed: float, dt: float,
-                screen_w: int, win_w: int):
-    """working 巡逻：推进窗口 x 并在屏幕左右边缘折返。direction: +1 右 / -1 左。"""
+                x_min: int, x_max: int):
+    """working 巡逻：推进窗口 x 并在 [x_min, x_max]（窗口左上角允许范围）内折返。
+    direction: +1 右 / -1 左。多显示器下 x_min 可为负。"""
     x += direction * speed * dt
-    if x + win_w > screen_w:
-        x, direction = screen_w - win_w, -1
-    elif x < 0:
-        x, direction = 0, 1
+    if x > x_max:
+        x, direction = x_max, -1
+    elif x < x_min:
+        x, direction = x_min, 1
     return x, direction
+
+
+def monitor_span(x: int, y: int):
+    """点 (x,y) 所在显示器的水平范围 (left, right)；查不到回退主屏。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        spans = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                            ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+        def cb(h, dc, rc, lp):
+            r = rc.contents
+            spans.append((r.left, r.right))
+            return True
+
+        user32.EnumDisplayMonitors(None, None, cb, 0)
+        for lo, hi in spans:
+            if lo <= x < hi:
+                return lo, hi
+        return 0, user32.GetSystemMetrics(0)
+    except Exception:
+        return 0, 1920
 
 
 def read_new_events(path: Path, offset: int):
@@ -432,13 +457,15 @@ class Pet:
         elif self.bubble_text and now > self.bubble_until:
             self.bubble_text = None
 
-        # working 巡逻：沿屏底走动，拖拽中/落定期暂停
+        # working 巡逻：沿屏底走动，拖拽中/落定期暂停；在宠物所在显示器内折返
         if (self.state == "working" and not self._drag
                 and now > self.patrol_pause_until):
-            x, d = patrol_step(self.root.winfo_x(), self.patrol_dir, PATROL_SPEED,
-                               0.12, self.root.winfo_screenwidth(), self.W)
+            wx, wy = self.root.winfo_x(), self.root.winfo_y()
+            lo, hi = monitor_span(wx + self.W // 2, wy + self.H // 2)
+            x, d = patrol_step(wx, self.patrol_dir, PATROL_SPEED, 0.12,
+                               lo, hi - self.W)
             self.patrol_dir = d
-            self.root.geometry(f"+{int(x)}+{self.root.winfo_y()}")
+            self.root.geometry(f"+{int(x)}+{wy}")
 
         self.draw()
         self.root.after(120, self.tick)
