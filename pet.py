@@ -304,7 +304,10 @@ import tkinter.messagebox  # noqa: E402,F401（无皮肤时引导弹窗用）
 TRANSPARENT = "#010203"  # Windows 透明色：此颜色像素完全穿透
 
 PAT_WORDS = ["嘿~", "嘿嘿", "摸摸头？", "加油鸭！", "♪"]
-WORKING_DOTS = ["🐾 巡逻中", "🐾 巡逻中·", "🐾 巡逻中··", "🐾 巡逻中···"]
+def working_bubble(patrol_on: bool, phase: int) -> str:
+    """working 常驻气泡：开巡逻=巡逻中，关=工作中，点数循环。"""
+    base = "🐾 巡逻中" if patrol_on else "🐾 工作中"
+    return base + "·" * (phase // 8 % 3)
 
 
 class Pet:
@@ -461,7 +464,7 @@ class Pet:
             self._enter_temp("glance")
 
         if self.state == "working":
-            self.bubble_text = WORKING_DOTS[self.phase // 8 % 4]
+            self.bubble_text = working_bubble(self.patrol_on, self.phase)
             self.bubble_until = now + 2  # 常驻：working 状态期间每帧续期
         elif self.bubble_text and now > self.bubble_until:
             self.bubble_text = None

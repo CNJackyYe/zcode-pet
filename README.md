@@ -41,7 +41,7 @@ python pet.py --download non0
 | clack-astra | Clack Astra | v2（74 帧） | ✓ |
 | kanroji-mitsuri | mitsuri | v2（74 帧） | ✓ |
 
-完成。**新开一个 zcode 会话**随便发句话试试：任务跑起来宠物开始巡逻，回复结束它跳起来撒花+响铃。
+完成。**新开一个 zcode 会话**随便发句话试试：任务跑起来宠物开始巡逻，回复结束它跳起来+响铃提醒。
 
 > 说明：hooks 在 zcode **会话启动时**加载，安装前就开着的旧会话不会触发。
 > 需要代理时：`python pet.py --download non0 --proxy http://127.0.0.1:7897`，或先设 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量。
@@ -62,7 +62,7 @@ zcode 会话 ──hook事件──> pet_hook.py ──追加一行JSON──> ~
 | zcode 事件 | 宠物表现 | 动画行 |
 |---|---|---|
 | SessionStart | 上线打招呼 | waving |
-| UserPromptSubmit | "🐾 巡逻中…"，沿屏幕底部来回走动 | running-right / running-left |
+| UserPromptSubmit | 气泡"🐾 巡逻中…"，沿所在显示器来回走动（关巡逻则"🐾 工作中…"原地奔跑） | running-right / running-left（关巡逻时 running） |
 | **Stop（任务完成）** | **跳跃+"✅ 任务完成！"+提示音** | jumping |
 | （完成后 30s 没动静） | "看看我的成果？" | review |
 | PermissionRequest | "📋 等你审阅"+提示音 | review |
@@ -88,10 +88,11 @@ python pet.py --list [关键词]       :: 浏览 codex-pets 社区宠物
 python pet.py --download <id|URL>  :: 下载皮肤并设为当前形象
 python pet.py --pet <id>           :: 切换已下载形象
 python pet.py                      :: 启动桌宠
-python test_pet.py                 :: 自检（12 组断言）
+python test_pet.py                 :: 自检（15 组断言）
 ```
 
 - **拖拽**移动；**单击**撸宠（爱心+说话+跳跃）；**右键**菜单全功能
+- **巡逻开关**：开=工作状态沿所在显示器来回走动（气泡"🐾 巡逻中"）；关=原地奔跑（气泡"🐾 工作中"）。持久保存（`pets/patrol.txt`）
 - 大小档位 50%/75%/100%/150%/200% 持久保存（`pets/size.txt`）
 
 ## 常见问题

@@ -328,10 +328,15 @@ def test_patrol_toggle():
         assert (_pet.PETS_DIR / "patrol.txt").read_text(encoding="utf-8") == "0"
         assert _pet.load_patrol() is False
         p.on_event("UserPromptSubmit")
+        p.tick()
+        assert p.bubble_text.startswith("🐾 工作中"), f"关巡逻应显示工作中: {p.bubble_text}"
         x0 = p.root.winfo_x()
         for _ in range(10):
             p.tick(); p.root.update()
         assert p.root.winfo_x() == x0, "关闭巡逻后 working 状态不应移动窗口"
+        p._set_patrol(True)
+        p.tick()
+        assert p.bubble_text.startswith("🐾 巡逻中"), f"开巡逻应显示巡逻中: {p.bubble_text}"
     finally:
         p._set_patrol(initial)
         p.root.destroy()
