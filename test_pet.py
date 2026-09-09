@@ -20,9 +20,10 @@ def test_read_new_events():
         evs, off = pet.read_new_events(f, 0)
         assert evs == [] and off == 0, "不存在的文件应返回空"
 
-        f.write_text('{"event":"Stop","ts":1}\n{"event":"UserPromptSubmit","ts":2}\n', encoding="utf-8")
+        f.write_text('{"event":"Stop","ts":1,"sid":"sa","name":"alpha"}\n'
+                     '{"event":"UserPromptSubmit","ts":2}\n', encoding="utf-8")
         evs, off = pet.read_new_events(f, 0)
-        assert evs == ["Stop", "UserPromptSubmit"], evs
+        assert evs == [("Stop", "sa", "alpha"), ("UserPromptSubmit", "", None)], evs
         assert off == f.stat().st_size
 
         # 半行不读，等补全后一次读
@@ -33,43 +34,59 @@ def test_read_new_events():
         with open(f, "a", encoding="utf-8") as fh:
             fh.write('issionRequest","ts":3}\n垃圾行\n')
         evs, off3 = pet.read_new_events(f, off2)
-        assert evs == ["PermissionRequest"], evs  # 垃圾行被跳过
+        assert evs == [("PermissionRequest", "", None)], evs  # 垃圾行被跳过
 
         # 文件被清空（轮转）：offset 回退后重新读
         f.write_text('{"event":"Stop","ts":9}\n', encoding="utf-8")
         evs, off4 = pet.read_new_events(f, off3)
-        assert evs == ["Stop"] and off4 == f.stat().st_size, "轮转后应从头读"
-    print("ok read_new_events: 完整行/半行/垃圾行/轮转")
+        assert evs == [("Stop", "", None)] and off4 == f.stat().st_size, "轮转后应从头读"
+    print("ok read_new_events: 完整行/半行/垃圾行/轮转/sid透传")
 
 
 def test_event_map_states():
-    for ev, (state, text) in pet.EVENT_MAP.items():
+    for ev, state in pet.EVENT_MAP.items():
         assert state in ("greet", "working", "attention", "oops", "done"), ev
-        assert text
     assert set(pet.EVENT_MAP) <= set(pet.HOOK_EVENTS), "EVENT_MAP 必须都能被 hook 安装覆盖"
     print("ok EVENT_MAP: 事件全部映射到合法状态")
 
 
-def test_next_state():
+def test_session_states():
     now = 1000.0
-    assert pet.next_state("working", now - pet.WORKING_TIMEOUT - 1, now) == "idle"
-    assert pet.next_state("working", now - 1, now) == "working"
-    assert pet.next_state("idle", now - pet.IDLE_TO_SLEEP - 1, now) == "sleep"
-    assert pet.next_state("idle", now - 1, now) == "idle"
-    assert pet.next_state("sleep", now, now) == "sleep"
-    print("ok next_state: working超时/入睡/保持")
+    nss = pet.session_next_state
+    assert nss("working", now - pet.WORKING_TIMEOUT - 1, now, now) == "idle", "working 超时判死"
+    assert nss("working", now - 1, now, now) == "working"
+    assert nss("attention", now, now - pet.ATTENTION_TTL - 1, now) == "idle", "审阅超时视为已处理"
+    assert nss("oops", now, now - pet.TEMP_STATE_SECONDS - 1, now) == "working", "工具失败闪完继续干"
+    assert nss("done", now, now - pet.TEMP_STATE_SECONDS - 1, now) == "idle"
+    assert nss("greet", now, now - pet.TEMP_STATE_SECONDS - 1, now) == "idle"
+    # 聚合优先级：attention > working > oops > done > greet > idle
+    agg = pet.aggregate_state
+    assert agg({}) == "idle"
+    assert agg({"a": {"state": "working"}, "b": {"state": "done"}}) == "working", "还有人干就 working"
+    assert agg({"a": {"state": "attention"}, "b": {"state": "working"}}) == "attention"
+    assert agg({"a": {"state": "done"}}) == "done"
+    print("ok session_states: 单会话流转 + 多会话聚合优先级")
 
 
 def test_hook_subprocess(tmp_home):
     """真实跑一遍 pet_hook.py（HOME 指向临时目录），验证落盘内容。"""
     env = {**os.environ, "USERPROFILE": str(tmp_home)}
-    r = subprocess.run([PY, str(HERE / "pet_hook.py"), "--event", "Stop"],
-                       capture_output=True, env=env, timeout=10)
+    d = tempfile.mkdtemp()
+    r = subprocess.run([PY, str(HERE / "pet_hook.py"), "--event", "Stop", "--sid", "sess1"],
+                       capture_output=True, env=env, cwd=d, timeout=10)
     assert r.returncode == 0, r.stderr
+    # 无 --sid 时回退环境变量
+    r2 = subprocess.run([PY, str(HERE / "pet_hook.py"), "--event", "Stop"],
+                        capture_output=True, env={**env, "CLAUDE_SESSION_ID": "fromenv"},
+                        cwd=d, timeout=10)
+    assert r2.returncode == 0, r2.stderr
     f = tmp_home / ".zcode" / "pet" / "events.jsonl"
     lines = [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines()]
-    assert len(lines) == 1 and lines[0]["event"] == "Stop" and lines[0]["ts"] > 0
-    print("ok pet_hook: 子进程写入事件文件")
+    assert lines[0]["event"] == "Stop" and lines[0]["ts"] > 0
+    assert lines[0]["sid"] == "sess1"
+    assert lines[0]["name"] == Path(d).name, "任务名应取项目目录名"
+    assert lines[1]["sid"] == "fromenv", "无 --sid 应回退环境变量"
+    print("ok pet_hook: 子进程写入 sid/name（--sid 与环境变量双通道）")
 
 
 def test_install_uninstall(tmp_home):
@@ -267,11 +284,48 @@ def test_monitor_span():
 def test_t001_state_maps():
     assert pet.STATE_ANIM["attention"] == ("review", 1.0), "权限确认应播 review"
     assert "review_wait" in pet.STATE_ANIM and "glance" in pet.STATE_ANIM
-    assert pet.EVENT_MAP["PermissionRequest"][1] == "📋 等你审阅"
     for st in pet.STATE_ANIM:
         assert st in ("idle", "working", "done", "greet", "attention", "oops",
                       "sleep", "review_wait", "glance"), st
     print("ok T001 状态映射: attention=review / review_wait / glance")
+
+
+def test_multi_session(tmp_pets_v1):
+    """多任务并行（用户核心诉求）：A 完成提醒"B 还在继续"，working 气泡点名。"""
+    import pet as _pet
+    saved = _pet.PETS_DIR
+    _pet.PETS_DIR = tmp_pets_v1
+    try:
+        p = _pet.Pet(pet_id="v1pet")
+        p.muted = True
+        # A、B 两个任务先后开工
+        p.on_event("UserPromptSubmit", "sa", "alpha")
+        assert p.state == "working"
+        p.tick()
+        assert "alpha" in p.bubble_text, f"working 气泡应点名: {p.bubble_text}"
+        p.on_event("UserPromptSubmit", "sb", "beta")
+        p.tick()
+        assert "alpha" in p.bubble_text and "beta" in p.bubble_text
+        # A 完成、B 还在跑：提醒点名 + 宠物保持 working（继续巡逻）
+        p.on_event("Stop", "sa", "alpha")
+        assert p.state == "working", "B 还在继续，不应庆祝收工"
+        assert p.bubble_text == "✅ alpha 任务完成！（beta 还在继续）", p.bubble_text
+        # 最后一个也完成：全套收工
+        p.on_event("Stop", "sb", "beta")
+        assert p.state == "done"
+        assert p.bubble_text == "✅ beta 任务完成！", p.bubble_text
+        # A 等审阅：优先展示（要人操作）
+        p.on_event("UserPromptSubmit", "sa", "alpha")
+        p.on_event("PermissionRequest", "sa", "alpha")
+        assert p.state == "attention" and p.bubble_text == "📋 alpha 等你审阅"
+        # 同目录两个会话重名：加 sid 前缀区分
+        p.on_event("UserPromptSubmit", "sc", "alpha")
+        p.on_event("Stop", "sc", "alpha")
+        assert p.bubble_text.startswith("✅ alpha·sc 任务完成"), p.bubble_text
+        p.root.destroy()
+    finally:
+        _pet.PETS_DIR = saved
+    print("ok multi_session: A完成B继续/全部收工/审阅优先/重名区分")
 
 
 def test_t001_runtime(tmp_pets_v1):
@@ -285,8 +339,8 @@ def test_t001_runtime(tmp_pets_v1):
         p.muted = True
         p.on_event("Stop")
         assert p.state == "done"
-        # 熟化 done 到期 → 下一个 tick 应预约 followup 并回 idle
-        p.state_ts = time.time() - _pet.TEMP_STATE_SECONDS - 1
+        # 熟化会话 done 到期 → 下一个 tick 应预约 followup 并回 idle
+        p.sessions[""]["state_ts"] = time.time() - _pet.TEMP_STATE_SECONDS - 1
         p.tick()
         assert p.state == "idle" and p.review_followup_at > 0, "done 收尾应预约 review_wait"
         p.review_followup_at = time.time() - 1   # 快进 30 秒
@@ -420,7 +474,7 @@ if __name__ == "__main__":
         home = Path(d)
         test_read_new_events()
         test_event_map_states()
-        test_next_state()
+        test_session_states()
         test_hook_subprocess(home)
         test_install_uninstall(home)
     test_codex_pet_support()
@@ -444,4 +498,5 @@ if __name__ == "__main__":
             json.dumps({"id": "v1pet", "version": 1, "anims": {"idle": [0, 1]}}),
             encoding="utf-8")
         test_t001_runtime(v1dir)
+        test_multi_session(v1dir)
     print("ALL TESTS PASSED")

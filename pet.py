@@ -2,7 +2,8 @@
 
 一只趴在屏幕右下角的像素宠物（形象来自 codex-pets.net），通过轮询
 ~/.zcode/pet/events.jsonl 感知 zcode：收到任务 → 巡逻干活 / 任务完成 →
-跳起来提醒 / 等你审阅 / 闲时张望、睡觉。
+跳起来提醒 / 等你审阅 / 闲时张望、睡觉。多个 zcode 会话并行时，每个会话
+一台独立状态机再聚合显示——A 任务完成会提醒你"（B 还在继续）"。
 
 用法:
   python pet.py --install     安装 zcode hooks（写入 ~/.zcode/cli/config.json）
@@ -17,7 +18,6 @@
 """
 import json
 import random
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -35,19 +35,20 @@ EVENTS_FILE = PET_DIR / "events.jsonl"
 CONFIG_PATH = Path.home() / ".zcode" / "cli" / "config.json"
 HOOK_EVENTS = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUseFailure", "Stop"]
 
-# 事件 -> (状态, 气泡文本 or None=不弹气泡)
+# 事件 -> 所属会话进入的状态（气泡文案按任务名动态拼，见 on_event）
 EVENT_MAP = {
-    "SessionStart":       ("greet",     "我上线啦 👋"),
-    "UserPromptSubmit":   ("working",   "收到任务，干活中…"),
-    "PermissionRequest":  ("attention", "📋 等你审阅"),
-    "PostToolUseFailure": ("oops",      "💢 有个工具出错了"),
-    "Stop":               ("done",      "✅ 任务完成！"),
+    "SessionStart":       "greet",
+    "UserPromptSubmit":   "working",
+    "PermissionRequest":  "attention",
+    "PostToolUseFailure": "oops",
+    "Stop":               "done",
 }
-TEMP_STATES = ("greet", "done", "attention", "oops", "review_wait", "glance")  # 几秒后自动回 idle
 TEMP_STATE_SECONDS = 6.0
 STATE_TTL = {"glance": 2.5}  # 张望只持续一小会儿
-WORKING_TIMEOUT = 15 * 60      # working 无事件 15 分钟视为中断
-IDLE_TO_SLEEP = 5 * 60         # idle 5 分钟入睡
+WORKING_TIMEOUT = 15 * 60    # 会话 working 无事件 15 分钟视为中断
+ATTENTION_TTL = 2 * 60       # 等审阅无后续事件，这么久后视为已处理
+SESSION_TTL = 30 * 60        # 会话这么久无事件即剔除（没有 SessionEnd 事件可依赖）
+IDLE_TO_SLEEP = 5 * 60       # 全部空闲 5 分钟入睡
 REVIEW_FOLLOWUP_DELAY = 30     # done 收尾后多少秒追加"看看成果"
 PATROL_SPEED = 60              # working 巡逻速度 px/s
 PATROL_SETTLE = 3.0            # 拖拽放下后定住几秒再继续巡逻
@@ -90,7 +91,8 @@ def monitor_span(x: int, y: int):
 
 
 def read_new_events(path: Path, offset: int):
-    """从 offset 读新增完整 JSON 行，返回 (events, new_offset)。
+    """从 offset 读新增完整 JSON 行，返回 (records, new_offset)。
+    record = (event, sid, name)；旧格式无 sid 时为 ("", None)，全部并入默认会话。
     不完整的尾行（无换行符）留到下次，避免读到半行。"""
     try:
         size = path.stat().st_size
@@ -111,28 +113,44 @@ def read_new_events(path: Path, offset: int):
             if not line:
                 continue
             try:
-                ev = json.loads(line).get("event")
+                rec = json.loads(line)
+                ev = rec.get("event")
             except ValueError:
                 continue
             if ev in EVENT_MAP:
-                events.append(ev)
+                events.append((ev, rec.get("sid") or "", rec.get("name")))
     return events, offset
 
 
-def next_state(state: str, last_event_ts: float, now: float):
-    """按时间推导状态的自动流转（事件驱动的流转见 on_event）。"""
-    age = now - last_event_ts
-    if state == "working" and age > WORKING_TIMEOUT:
+AGG_PRIORITY = ("attention", "working", "oops", "done", "greet")
+
+
+def session_next_state(state: str, last_ts: float, state_ts: float, now: float) -> str:
+    """单会话状态自动流转：瞬态到期回落、working 超时判死、审阅超时视为已处理。"""
+    if state == "working" and now - last_ts > WORKING_TIMEOUT:
         return "idle"
-    if state == "idle" and age > IDLE_TO_SLEEP:
-        return "sleep"
+    if state == "attention" and now - state_ts > ATTENTION_TTL:
+        return "idle"   # ponytail: 没有"已批准"事件，只能超时后假定已处理
+    if state == "oops" and now - state_ts > TEMP_STATE_SECONDS:
+        return "working"  # 工具失败不终止任务，闪完继续干
+    if state in ("greet", "done") and now - state_ts > TEMP_STATE_SECONDS:
+        return "idle"
     return state
+
+
+def aggregate_state(sessions: dict) -> str:
+    """多会话 -> 宠物全局状态：按 AGG_PRIORITY 取最要紧的，都闲着才 idle。
+    有人等审阅最优先（需要人操作），还有人在干就保持 working。"""
+    live = {s["state"] for s in sessions.values()}
+    return next((st for st in AGG_PRIORITY if st in live), "idle")
 
 
 def hook_config(python_exe: str, hook_script: str) -> dict:
     def cmd(event):
         return {"type": "process", "command": python_exe,
-                "args": [hook_script, "--event", event], "timeoutMs": 5000}
+                "args": [hook_script, "--event", event,
+                         "--sid", "${CLAUDE_SESSION_ID}"],  # zcode 展开会话 id
+                "timeoutMs": 5000}
     return {"enabled": True,
             "events": {ev: [{"hooks": [cmd(ev)]}] for ev in HOOK_EVENTS}}
 
@@ -167,13 +185,6 @@ def remove_hooks(cfg_path: Path) -> dict:
     cfg.pop("hooks", None)
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     return cfg
-
-
-def demo_event(event: str) -> None:
-    """手工注入一个事件（测试提醒用）。"""
-    subprocess.Popen([sys.executable, str(Path(__file__).parent / "pet_hook.py"),
-                      "--event", event],
-                     creationflags=0x08000000)  # CREATE_NO_WINDOW
 
 
 # ---------- codex-pets.net 像素宠物支持 ----------
@@ -342,9 +353,10 @@ import tkinter.messagebox  # noqa: E402,F401（无皮肤时引导弹窗用）
 TRANSPARENT = "#010203"  # Windows 透明色：此颜色像素完全穿透
 
 PAT_WORDS = ["嘿~", "嘿嘿", "摸摸头？", "加油鸭！", "♪"]
-def working_bubble(patrol_on: bool, phase: int) -> str:
-    """working 常驻气泡：开巡逻=巡逻中，关=工作中，点数循环。"""
-    base = "🐾 巡逻中" if patrol_on else "🐾 工作中"
+def working_bubble(patrol_on: bool, phase: int, names: str = "") -> str:
+    """working 常驻气泡：点名在跑的任务，开巡逻=巡逻中，关=工作中，点数循环。"""
+    who = f"{names} " if names else ""
+    base = f"🐾 {who}{'巡逻中' if patrol_on else '工作中'}"
     return base + "·" * (phase // 8 % 3)
 
 
@@ -386,6 +398,7 @@ class Pet:
         self.cv.pack()
 
         self.state = "idle"
+        self.sessions = {}         # sid -> {sid,name,state,last_ts,state_ts} 每会话独立状态机
         self.muted = self.settings["muted"]
         self.patrol_on = self.settings["patrol"]
         self.patrol_dir = random.choice((1, -1))
@@ -401,6 +414,7 @@ class Pet:
         self.last_event_ts, self.state_ts, self.phase = time.time(), time.time(), 0
         self.bubble_until, self.pat_until = 0, 0
         self.bubble_text = None
+        self.bubble_is_notify = False   # 当前气泡是否通知类（✅/📋等，working 常驻气泡让位）
         self._drag = None
         self._menu = None
         self._ids = []          # 宠物图元 id
@@ -455,22 +469,52 @@ class Pet:
                 self.offset = 0
         except OSError:
             pass
+        # 无 SessionEnd 事件：超久无动静的会话直接剔除，防 sessions 无限增长
+        now = time.time()
+        self.sessions = {k: s for k, s in self.sessions.items()
+                         if now - s["last_ts"] < SESSION_TTL}
         events, self.offset = read_new_events(EVENTS_FILE, self.offset)
-        for ev in events:
-            self.on_event(ev)
+        for ev, sid, name in events:
+            self.on_event(ev, sid, name)
         self.root.after(500, self.poll)
 
-    def on_event(self, ev: str):
-        state, text = EVENT_MAP[ev]
+    def _display_name(self, s: dict) -> str:
+        """会话显示名：项目目录名；同目录并行多个会话时加 sid 前缀区分。"""
+        n = s["name"] or ""
+        if n and sum(1 for t in self.sessions.values() if (t["name"] or "") == n) > 1:
+            n = f"{n}·{s['sid'][:4]}"
+        return n
+
+    def on_event(self, ev: str, sid: str = "", name: str = None):
         now = time.time()
-        self.state, self.last_event_ts, self.state_ts = state, now, now
+        self.last_event_ts = now
+        s = self.sessions.setdefault(
+            sid, {"sid": sid, "name": None, "state": "idle",
+                  "last_ts": now, "state_ts": now})
+        if name:
+            s["name"] = name
+        s["state"], s["last_ts"], s["state_ts"] = EVENT_MAP[ev], now, now
         self._glance_anim = None       # 新事件打断张望
-        if text:
-            self.say(text)
-        if state == "done" and not self.muted:
-            self.beep("asterisk")
-        elif state == "attention" and not self.muted:
-            self.beep("exclamation")
+        who = self._display_name(s)
+        tag = f"{who} " if who else ""
+        others = [self._display_name(t) for t in self.sessions.values()
+                  if t is not s and t["state"] == "working"]
+        if ev == "Stop":
+            tail = (f"（{'、'.join(o for o in others if o)} 还在继续）"
+                    if others else "")
+            self.say(f"✅ {tag}任务完成！{tail}")
+            if not self.muted:
+                self.beep("asterisk")
+        elif ev == "PermissionRequest":
+            self.say(f"📋 {tag}等你审阅")
+            if not self.muted:
+                self.beep("exclamation")
+        elif ev == "SessionStart":
+            self.say(f"👋 {tag}上线")
+        elif ev == "PostToolUseFailure":
+            self.say(f"💢 {tag}有个工具出错了")
+        # UserPromptSubmit 不弹气泡：working 常驻气泡由 tick 点名生成
+        self.state, self.state_ts = aggregate_state(self.sessions), now
 
     def beep(self, kind):
         try:
@@ -482,6 +526,7 @@ class Pet:
 
     def say(self, text, seconds=None):
         self.bubble_text = text
+        self.bubble_is_notify = True
         self.bubble_until = time.time() + (seconds if seconds is not None
                                            else TEMP_STATE_SECONDS)
 
@@ -490,33 +535,49 @@ class Pet:
     def tick(self):
         now = time.time()
         self.phase += 1
-        self.state = next_state(self.state, self.last_event_ts, now)
 
-        # 临时状态到期 → 回 idle（done 收尾时预约"看看成果"小剧场）
-        if self.state in TEMP_STATES and now - self.state_ts > STATE_TTL.get(self.state, TEMP_STATE_SECONDS):
-            if self.state == "done":
-                self.review_followup_at = now + REVIEW_FOLLOWUP_DELAY
-            if self.state == "glance":
+        # 1) 每个会话各自流转（瞬态到期/超时）；全局收工时预约"看看成果"
+        for s in self.sessions.values():
+            prev = s["state"]
+            s["state"] = session_next_state(prev, s["last_ts"], s["state_ts"], now)
+            if s["state"] != prev:
+                s["state_ts"] = now
+                if prev == "done" and aggregate_state(self.sessions) == "idle":
+                    self.review_followup_at = now + REVIEW_FOLLOWUP_DELAY
+
+        # 2) 聚合出全局状态；全部空闲时维持 glance/review_wait/sleep 自转
+        agg = aggregate_state(self.sessions)
+        if agg != "idle":
+            if self.state != agg:
+                self.state, self.state_ts, self._glance_anim = agg, now, None
+        else:
+            if self.state == "glance" and now - self.state_ts > STATE_TTL["glance"]:
                 self._glance_anim = None
-            self.state, self.state_ts = "idle", now
+                self.state, self.state_ts = "idle", now
+            elif self.state in AGG_PRIORITY:    # 聚合已空闲，活动态直接落幕
+                self.state, self.state_ts = "idle", now
+            if self.state == "review_wait" and now - self.state_ts > TEMP_STATE_SECONDS:
+                self.state, self.state_ts = "idle", now
+            # ponytail: 不做"用户无操作"检测（stdlib 无全局输入监听），固定延迟代替
+            if self.state == "idle" and self.review_followup_at and now >= self.review_followup_at:
+                self.review_followup_at = 0
+                self._enter_temp("review_wait", "看看我的成果？")
+            elif (self.state == "idle" and self._glance_anim is None
+                    and not self.bubble_text and now >= self.next_glance_at
+                    and self._look_anims):
+                self.next_glance_at = now + random.uniform(20, 60)
+                self._glance_anim = random.choice(self._look_anims)
+                self._enter_temp("glance")
+            if self.state == "idle" and now - self.last_event_ts > IDLE_TO_SLEEP:
+                self.state = "sleep"
 
-        # ponytail: 不做"用户无操作"检测（stdlib 无全局输入监听），固定 30s 延迟代替
-        if (self.state == "idle" and self.review_followup_at
-                and now >= self.review_followup_at):
-            self.review_followup_at = 0
-            self._enter_temp("review_wait", "看看我的成果？")
-
-        # v2 皮肤：idle 且安静时随机张望
-        if (self.state == "idle" and self._glance_anim is None
-                and not self.bubble_text and now >= self.next_glance_at
-                and self._look_anims):
-            self.next_glance_at = now + random.uniform(20, 60)
-            self._glance_anim = random.choice(self._look_anims)
-            self._enter_temp("glance")
-
-        if self.state == "working":
-            self.bubble_text = working_bubble(self.patrol_on, self.phase)
-            self.bubble_until = now + 2  # 常驻：working 状态期间每帧续期
+        # 3) working 常驻气泡：点名在跑的任务，每帧刷新（通知气泡存活期间让位）
+        if self.state == "working" and not (self.bubble_text and self.bubble_is_notify):
+            names = "、".join(self._display_name(s) for s in self.sessions.values()
+                             if s["state"] == "working")
+            self.bubble_text = working_bubble(self.patrol_on, self.phase, names)
+            self.bubble_is_notify = False
+            self.bubble_until = now + 2
         elif self.bubble_text and now > self.bubble_until:
             self.bubble_text = None
 
@@ -693,6 +754,7 @@ class Pet:
     def _release(self, e):
         if self._drag and not self._drag[4]:  # 未拖动 = 单击撸猫
             self.pat_until = time.time() + 1.5
+            self.last_event_ts = time.time()  # 醒后别下一拍又立刻睡回去
             if self.state == "sleep":
                 self.state, self.state_ts = "idle", time.time()
             if random.random() < 0.6:

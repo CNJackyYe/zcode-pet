@@ -2,7 +2,7 @@
 
 **给你的 zcode 养一只桌面宠物。** 它趴在屏幕右下角（形象来自 [codex-pets.net](https://codex-pets.net) 社区像素宠物）：zcode 接到任务它就沿屏幕底部巡逻干活，任务完成跳起来提醒，等你审阅时举牌呼叫，闲时好奇张望、打瞌睡——你可以撸它、拖它、换皮肤、调大小。
 
-- **zcode 任务感知**：通过 zcode hooks 实时联动（多会话事件汇到一只宠物身上）
+- **zcode 任务感知**：通过 zcode hooks 实时联动；**多个 zcode 会话并行时每个会话一台独立状态机**——A 任务完成会提醒你"（B 还在继续）"，还有人干活就继续巡逻，全部收工才庆祝
 - **11 种动画全用上**：idle / 巡逻(左右奔跑) / 挥手 / 跳跃 / 失败 / 等待 / 奔跑 / 审阅 / 左右张望
 - **codex-pets.net 社区皮肤**：`--list` 浏览、`--download` 一条命令换形象
 - **零依赖运行**：纯 Python 标准库（tkinter + winsound），下载皮肤时才需要 Pillow
@@ -51,28 +51,31 @@ python pet.py --download non0
 ## 工作原理
 
 ```
-zcode 会话 ──hook事件──> pet_hook.py ──追加一行JSON──> ~/.zcode/pet/events.jsonl
+zcode 会话 ──hook事件(sid+项目名)──> pet_hook.py ──追加一行JSON──> ~/.zcode/pet/events.jsonl
                                                             │ 桌宠每500ms增量轮询
                                                             ▼
-              pet.py（tkinter 透明置顶窗口 + 状态机 + 逐帧动画）
+              pet.py（tkinter 透明置顶窗口 + 每会话状态机聚合 + 逐帧动画）
 ```
 
 **事件 → 状态 → 动画**（codex-pets 图集 11 行动画全启用）：
 
+事件行带会话 id（`${CLAUDE_SESSION_ID}`）和项目目录名，桌宠按会话各建一台状态机再聚合显示：气泡点名在跑的任务，等审阅优先展示，全部空闲才待机/入睡。
+
 | zcode 事件 | 宠物表现 | 动画行 |
 |---|---|---|
-| SessionStart | 上线打招呼 | waving |
-| UserPromptSubmit | 气泡"🐾 巡逻中…"，沿所在显示器来回走动（关巡逻则"🐾 工作中…"原地奔跑） | running-right / running-left（关巡逻时 running） |
-| **Stop（任务完成）** | **跳跃+"✅ 任务完成！"+提示音** | jumping |
-| （完成后 30s 没动静） | "看看我的成果？" | review |
-| PermissionRequest | "📋 等你审阅"+提示音 | review |
-| PostToolUseFailure | "💢 有个工具出错了" | failed |
+| SessionStart | "👋 任务名 上线" | waving |
+| UserPromptSubmit | 气泡"🐾 任务名 巡逻中…"，沿所在显示器来回走动（关巡逻则"工作中…"原地奔跑） | running-right / running-left（关巡逻时 running） |
+| **Stop（任务完成）** | **"✅ 任务名 任务完成！"+提示音**；还有任务在跑则附"（B 还在继续）"且继续巡逻，全部收工才跳跃庆祝 | jumping |
+| （全部完成后 30s 没动静） | "看看我的成果？" | review |
+| PermissionRequest | "📋 任务名 等你审阅"+提示音，优先展示 | review |
+| PostToolUseFailure | "💢 任务名 有个工具出错了"（任务仍算在跑） | failed |
 | 空闲随机 | 好奇张望 2.5 秒（v2 皮肤） | look-right / look-left |
 | 空闲 5 分钟 | 打瞌睡 | waiting 慢放 |
-| working 超 15 分钟无事件 | 视为中断回待机 | idle |
+| 某会话 working 超 15 分钟无事件 | 该会话视为中断回待机 | idle |
 
 其他细节：
 
+- 同一目录开多个 zcode 会话（任务重名）时自动加会话 id 后缀区分，如 `zcode-pet·a1b2`；会话 30 分钟无事件自动剔除（zcode 没有 SessionEnd 事件，靠超时回收）
 - 巡逻速度 60px/s，在**宠物所在显示器**的边界内折返（多显示器：拖到哪块屏就在哪块屏巡逻）；拖拽期间暂停，放下后定 3 秒再继续
 - 皮肤格式：codex-pets 官方图集 v1=1536×1872(9行) / v2=1536×2288(11行)，每帧 192×208、
   8 列；下载时 Pillow 按官方动画行定义切成逐帧 PNG 存到 `pets/<id>/frames/`
